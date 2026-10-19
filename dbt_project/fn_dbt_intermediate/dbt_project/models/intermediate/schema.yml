@@ -1,0 +1,13 @@
+version: 2
+
+models:
+  - name: int_customer_transactions
+    description: "Modelo intermedio que une las ventas con el perfil del cliente."
+    columns:
+      - name: sale_id
+        tests:
+          - unique
+          - not_null
+      - name: customer_id
+        tests:
+          - not_null

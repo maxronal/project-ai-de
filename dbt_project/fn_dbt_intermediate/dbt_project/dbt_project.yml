@@ -1,0 +1,13 @@
+name: 'dbt_intermediate'
+version: '1.0.0'
+config-version: 2
+profile: 'dbt_project'
+model-paths: ["models"]
+target-path: "target"
+clean-targets:
+  - "target"
+models:
+  dbt_intermediate:
+    intermediate:
+      +materialized: view
+      +schema: intermediate

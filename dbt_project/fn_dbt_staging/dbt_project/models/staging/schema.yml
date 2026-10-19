@@ -1,0 +1,9 @@
+version: 2
+sources:
+  - name: silver_dataset
+    tables:
+      - name: sales_clean
+  - name: raw_dataset
+    tables:
+      - name: customers_raw
+      - name: products_raw
