@@ -1,0 +1,52 @@
+version: 2
+
+models:
+  - name: dim_customer
+    description: "Tabla de dimensión con el catálogo maestro de clientes."
+    columns:
+      - name: customer_id
+        description: "Llave primaria de cliente."
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_product
+    description: "Tabla de dimensión con el catálogo de productos."
+    columns:
+      - name: product_id
+        description: "Llave primaria del producto."
+        tests:
+          - unique
+          - not_null
+
+  - name: fct_sales
+    description: "Tabla de hechos con las ventas individuales validadas."
+    columns:
+      - name: sale_id
+        description: "Llave primaria única de la transacción."
+        tests:
+          - unique
+          - not_null
+      - name: customer_id
+        description: "Clave foránea apuntando al cliente."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_customer')
+              field: customer_id
+      - name: product_id
+        description: "Clave foránea apuntando al producto."
+        tests:
+          - not_null
+          - relationships:
+              to: ref('dim_product')
+              field: product_id
+
+  - name: customer_360
+    description: "Data Mart analítico con la vista 360 de métricas por cliente."
+    columns:
+      - name: customer_id
+        description: "Identificador único del cliente."
+        tests:
+          - unique
+          - not_null

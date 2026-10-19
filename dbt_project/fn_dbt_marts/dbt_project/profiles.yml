@@ -1,0 +1,10 @@
+dbt_project:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: service-account
+      project: project-ai-de-ind26
+      dataset: analytics_marts
+      threads: 4
+      location: us-east4
