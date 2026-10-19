@@ -1,0 +1,215 @@
+import os
+import io
+from datetime import datetime
+import functions_framework
+import pandas as pd
+from google.cloud import storage, bigquery
+
+# Configuración de variables globales
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT", "project-ai-de-ind26")
+RAW_BUCKET_NAME = os.environ.get("DEST_BUCKET", "gcs-project-ai-de-raw")
+DATASET_ID = os.environ.get("DATASET_ID", "ds_raw_ext")
+
+# -----------------------------------------------------------------------------
+# DDL / DML MAPPING: TODOS LOS CAMPOS DE NEGOCIO SON STRING
+# TODAS LAS TABLAS PARTICIONADAS POR ingestion_date (DATE)
+# -----------------------------------------------------------------------------
+TABLE_CONFIG = {
+    "sales": {
+        "file_extension": ".csv",
+        "table_name": "sales",
+											
+        "schema": [
+            bigquery.SchemaField("sale_id", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("customer_id", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("product_id", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("sale_timestamp", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("quantity", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("unit_price", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("ingested_at", "TIMESTAMP", mode="NULLABLE"),
+            bigquery.SchemaField("ingestion_date", "DATE", mode="NULLABLE"),
+        ]
+    },
+    "customers": {
+        "file_extension": ".csv",
+        "table_name": "customers",
+											
+        "schema": [
+            bigquery.SchemaField("customer_id", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("signup_date", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("city", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("segment", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("ingested_at", "TIMESTAMP", mode="NULLABLE"),
+            bigquery.SchemaField("ingestion_date", "DATE", mode="NULLABLE"),
+        ]
+    },
+    "products": {
+        "file_extension": ".json",
+        "table_name": "products",
+											
+        "schema": [
+            bigquery.SchemaField("product_id", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("brand", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("description", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("price", "STRING", mode="NULLABLE"),
+            bigquery.SchemaField("ingested_at", "TIMESTAMP", mode="NULLABLE"),
+            bigquery.SchemaField("ingestion_date", "DATE", mode="NULLABLE"),
+        ]
+    }
+}
+
+
+def transform_to_raw_string_df(entity: str, content: bytes, target_date: str) -> pd.DataFrame:
+    """Lee y convierte todos los campos a tipo STRING para la capa RAW."""
+    
+    if entity == "products":
+        try:
+            df = pd.read_json(io.BytesIO(content), lines=True, dtype=str)
+        except ValueError:
+            df = pd.read_json(io.BytesIO(content), dtype=str)
+												  
+        df = pd.json_normalize(df.to_dict(orient="records"))
+    else:
+        df = pd.read_csv(io.BytesIO(content), dtype=str)
+
+    # Forzar conversión de todos los valores leídos a STRING (manejando Nones/NaNs)
+    for col in df.columns:
+        df[col] = df[col].astype(str).replace({"nan": None, "None": None, "<NA>": None})
+
+    # Campos específicos de mapeo por entidad
+    if entity == "sales":
+																				
+        if "timestamp" in df.columns:
+            df["sale_timestamp"] = df["timestamp"]
+        df = df.reindex(columns=["sale_id", "customer_id", "product_id", "sale_timestamp", "quantity", "unit_price"])
+
+    elif entity == "customers":
+        df = df.reindex(columns=["customer_id", "signup_date", "city", "segment"])
+
+    elif entity == "products":
+        df = df.reindex(columns=["product_id", "category", "brand", "description", "price"])
+
+																				
+    for col in df.columns:
+        df[col] = df[col].astype(str).replace({"nan": None, "None": None, "<NA>": None})
+
+    # Metadatos de auditoría y particionamiento
+    df["ingested_at"] = pd.Timestamp.now(tz="UTC")
+    df["ingestion_date"] = pd.to_datetime(target_date).date()
+
+    return df
+
+
+@functions_framework.http
+def ingest_raw_to_bigquery_param(request):
+	   
+									  
+					   
+	   
+																							 
+																										
+	   
+	   
+    try:
+        request_json = request.get_json(silent=True) or {}
+        
+										 
+        target_entity = str(request_json.get("entity", "all")).lower()
+								  
+        target_date = "2026-10-17"
+        ##str(request_json.get("ingestion_date", datetime.now().strftime("%Y-%m-%d")))
+
+								  
+        try:
+            datetime.strptime(target_date, "%Y-%m-%d")
+        except ValueError:
+            return {
+                "status": "error",
+                "message": f"Formato de fecha inválido: '{target_date}'. Debe ser YYYY-MM-DD."
+            }, 400
+
+											
+        if target_entity == "all":
+            entities_to_process = list(TABLE_CONFIG.keys())
+        elif target_entity in TABLE_CONFIG:
+            entities_to_process = [target_entity]
+        else:
+            return {
+                "status": "error",
+                "message": f"Entidad '{target_entity}' no soportada. Opciones válidas: {list(TABLE_CONFIG.keys())} o 'all'"
+            }, 400
+
+        storage_client = storage.Client(project=GCP_PROJECT_ID)
+        bq_client = bigquery.Client(project=GCP_PROJECT_ID)
+
+													   
+        dataset_ref = bigquery.DatasetReference(GCP_PROJECT_ID, DATASET_ID)
+        dataset = bigquery.Dataset(dataset_ref)
+        dataset.location = "us-east4"
+        bq_client.create_dataset(dataset, exists_ok=True)
+
+        bucket = storage_client.bucket(RAW_BUCKET_NAME)
+        results = []
+
+																		   
+        for entity in entities_to_process:
+            config = TABLE_CONFIG[entity]
+            prefix = f"{entity}/ingestion_date={target_date}/"
+            
+            blobs = list(bucket.list_blobs(prefix=prefix))
+            file_blobs = [b for b in blobs if b.name.endswith(config["file_extension"])]
+
+            if not file_blobs:
+                results.append({
+                    "entity": entity,
+                    "ingestion_date": target_date,
+                    "status": "warning",
+                    "message": f"No se encontraron archivos en gs://{RAW_BUCKET_NAME}/{prefix}"
+                })
+                continue
+
+            dfs_to_concat = []
+            for blob in file_blobs:
+                content = blob.download_as_bytes()
+                df_temp = transform_to_raw_string_df(entity, content, target_date)
+                dfs_to_concat.append(df_temp)
+
+            df_final = pd.concat(dfs_to_concat, ignore_index=True)
+
+            table_id = f"{GCP_PROJECT_ID}.{DATASET_ID}.{config['table_name']}"
+
+            # CORRECCIÓN AQUÍ: Se especifica type_="DAY" directamente como cadena
+            job_config = bigquery.LoadJobConfig(
+                schema=config["schema"],
+																	   
+                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                time_partitioning=bigquery.TimePartitioning(
+                    type_="DAY",
+                    field="ingestion_date"
+                )
+            )
+
+									  
+            load_job = bq_client.load_table_from_dataframe(df_final, table_id, job_config=job_config)
+            load_job.result()
+
+            results.append({
+                "entity": entity,
+                "table": table_id,
+                "ingestion_date": target_date,
+                "rows_loaded": len(df_final),
+                "status": "success"
+            })
+
+        return {
+            "status": "success",
+            "execution_date": target_date,
+            "processed_entities": results
+        }, 200
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Error durante el proceso parametrizado: {str(e)}"
+        }, 500

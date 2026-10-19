@@ -1,0 +1,80 @@
+import os
+from datetime import datetime
+import functions_framework
+from google.cloud import storage
+
+# Configuración de buckets y proyecto activo
+SOURCE_BUCKET_NAME = os.environ.get("SOURCE_BUCKET", "data-pre-raw")
+DEST_BUCKET_NAME = os.environ.get("DEST_BUCKET", "gcs-project-ai-de-raw")
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT", "project-ai-de-ind26")
+
+SUPPORTED_ENTITIES = ["customers", "products", "sales"]
+
+@functions_framework.http
+def ingest_pre_raw_to_raw(request):
+    try:
+        # Configurar cliente
+        storage_client = storage.Client(project=GCP_PROJECT_ID)
+        
+        # Instanciar buckets asignando el proyecto para Requester Pays en origen
+        source_bucket = storage_client.bucket(SOURCE_BUCKET_NAME, user_project=GCP_PROJECT_ID)
+        dest_bucket = storage_client.bucket(DEST_BUCKET_NAME)
+
+        # Listar objetos del bucket de origen
+        blobs = list(source_bucket.list_blobs())
+
+        # Filtrar solo archivos
+        file_blobs = [b for b in blobs if not b.name.endswith("/")]
+
+        if not file_blobs:
+            return {
+                "status": "success",
+                "message": "No se encontraron archivos en el bucket de origen.",
+                "moved_files": []
+            }, 200
+
+        load_date = "2026-10-17"
+        ##datetime.now().strftime("%Y-%m-%d")
+        processed_files = []
+
+        for blob in file_blobs:
+            parts = blob.name.split("/")
+            filename = parts[-1]
+            entity = parts[0] if len(parts) > 1 else "uncategorized"
+
+            if entity in SUPPORTED_ENTITIES:
+                destination_path = f"{entity}/ingestion_date={load_date}/{filename}"
+            else:
+                destination_path = f"other/{entity}/ingestion_date={load_date}/{filename}"
+
+            print(destination_path)
+            # 1. Leer en bytes desde data-pre-raw
+            content = blob.download_as_bytes()
+
+            # 2. Escribir en el nuevo bucket de destino
+            dest_blob = dest_bucket.blob(destination_path)
+            dest_blob.upload_from_string(
+                content, 
+                content_type=blob.content_type or "application/octet-stream"
+            )
+            
+            # 3. Eliminar archivo original
+            ## blob.delete()
+
+            processed_files.append({
+                "original": blob.name,
+                "destination": destination_path
+            })
+
+        return {
+            "status": "success",
+            "message": f"Se procesaron y movieron {len(processed_files)} archivo(s) a la zona RAW.",
+            "execution_date": load_date,
+            "moved_files": processed_files
+        }, 200
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Error al procesar la ingesta: {str(e)}"
+        }, 500
